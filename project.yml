@@ -22,7 +22,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.yuyanfriends.app
         PRODUCT_NAME: CustomerServiceApp
         MARKETING_VERSION: 1.0.8
-        CURRENT_PROJECT_VERSION: 2
+        CURRENT_PROJECT_VERSION: 3
         DEVELOPMENT_TEAM: XTGL9G753G
         INFOPLIST_FILE: CustomerServiceApp/Info.plist
         CODE_SIGN_ENTITLEMENTS: CustomerServiceApp/CustomerServiceApp.entitlements
@@ -40,3 +40,4 @@ schemes:
         CustomerServiceApp: all
     archive:
       config: Release
+

@@ -15,11 +15,14 @@ final class ChatViewModel: ObservableObject {
     @Published var messages: [ChatMessage] = []
     @Published var errorText = ""
     @Published var connected = false
+    @Published private(set) var closingTokens: Set<String> = []
 
     private var socket: URLSessionWebSocketTask?
+    private var socketSession: URLSession?
     private var receiveTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+    private var syncTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
 
     init() {
@@ -42,8 +45,7 @@ final class ChatViewModel: ObservableObject {
 
     func login() async {
         do {
-            server = server.trimmingCharacters(in: .whitespacesAndNewlines)
-                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            server = normalizedServer(server)
             let body = LoginBody(username: username, password: password)
             let response: LoginResponse = try await APIClient.shared.request(
                 "/api/auth/login",
@@ -64,7 +66,7 @@ final class ChatViewModel: ObservableObject {
             UserDefaults.standard.set(authToken, forKey: "authToken")
 
             await refreshChats()
-            connectSocket()
+            startRealtime()
             requestPushPermission()
             await openPendingPushIfNeeded()
         } catch {
@@ -73,18 +75,20 @@ final class ChatViewModel: ObservableObject {
     }
 
     func logout() {
-        stopSocket()
+        stopRealtime()
         authToken = ""
         me = nil
         chats = []
         selected = nil
         messages = []
+        closingTokens = []
         UserDefaults.standard.removeObject(forKey: "authToken")
     }
 
     func restore() async {
         guard loggedIn else { return }
         do {
+            server = normalizedServer(server)
             let user: APIUser = try await APIClient.shared.request(
                 "/api/auth/me",
                 baseURL: server,
@@ -92,7 +96,7 @@ final class ChatViewModel: ObservableObject {
             )
             me = user
             await refreshChats()
-            connectSocket()
+            startRealtime()
             requestPushPermission()
             await openPendingPushIfNeeded()
         } catch {
@@ -100,7 +104,13 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    func refreshChats() async {
+    func becameActive() async {
+        guard loggedIn else { return }
+        connectSocket(force: socket == nil)
+        await syncNow()
+    }
+
+    func refreshChats(silent: Bool = false) async {
         guard loggedIn else { return }
         do {
             let rows: [ChatSession] = try await APIClient.shared.request(
@@ -108,12 +118,14 @@ final class ChatViewModel: ObservableObject {
                 baseURL: server,
                 token: authToken
             )
-            chats = rows
-            if let selected, let newer = rows.first(where: { $0.token == selected.token }) {
-                self.selected = newer
+            chats = sortedChats(rows.filter { $0.is_closed != true })
+            if let selected {
+                self.selected = chats.first(where: { $0.token == selected.token }) ?? self.selected
             }
         } catch {
-            errorText = error.localizedDescription
+            if !silent {
+                errorText = error.localizedDescription
+            }
         }
     }
 
@@ -139,9 +151,11 @@ final class ChatViewModel: ObservableObject {
                 baseURL: server,
                 token: authToken
             )
+            guard selected?.token == session.token else { return }
             selected = response.session
-            messages = response.messages
-            await refreshChats()
+            messages = response.messages.sorted { $0.id < $1.id }
+            upsertSession(response.session)
+            await markRead(session.token, refreshList: true)
         } catch {
             errorText = error.localizedDescription
         }
@@ -153,13 +167,53 @@ final class ChatViewModel: ObservableObject {
         guard !content.isEmpty else { return }
 
         do {
-            let _: ChatMessage = try await APIClient.shared.request(
+            let sent: ChatMessage = try await APIClient.shared.request(
                 "/api/staff/chats/\(session.token)/messages",
                 baseURL: server,
                 token: authToken,
                 method: "POST",
                 body: SendMessageBody(content: content, kind: "text")
             )
+            appendOrReplace(sent)
+            Task { [weak self] in
+                await self?.refreshChats(silent: true)
+            }
+        } catch {
+            errorText = error.localizedDescription
+        }
+    }
+
+    func uploadImage(_ data: Data) async {
+        guard let session = selected else { return }
+        do {
+            let sent = try await APIClient.shared.uploadImage(
+                "/api/staff/chats/\(session.token)/upload",
+                baseURL: server,
+                token: authToken,
+                data: data
+            )
+            appendOrReplace(sent)
+            Task { [weak self] in
+                await self?.refreshChats(silent: true)
+            }
+        } catch {
+            errorText = error.localizedDescription
+        }
+    }
+
+    func close(_ session: ChatSession) async {
+        guard !closingTokens.contains(session.token) else { return }
+        closingTokens.insert(session.token)
+        defer { closingTokens.remove(session.token) }
+
+        do {
+            let _: CloseChatResponse = try await APIClient.shared.request(
+                "/api/staff/chats/\(session.token)/close",
+                baseURL: server,
+                token: authToken,
+                method: "POST"
+            )
+            removeSession(token: session.token)
         } catch {
             errorText = error.localizedDescription
         }
@@ -180,20 +234,6 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    func uploadImage(_ data: Data) async {
-        guard let session = selected else { return }
-        do {
-            _ = try await APIClient.shared.uploadImage(
-                "/api/staff/chats/\(session.token)/upload",
-                baseURL: server,
-                token: authToken,
-                data: data
-            )
-        } catch {
-            errorText = error.localizedDescription
-        }
-    }
-
     func requestPushPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, _ in
             guard granted else { return }
@@ -203,13 +243,83 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    private func openPendingPushIfNeeded() async {
-        guard let token = UserDefaults.standard.string(forKey: "pendingPushSessionToken") else { return }
-        await open(token: token)
+    private func markRead(_ token: String, refreshList: Bool) async {
+        guard loggedIn else { return }
+        do {
+            let _: ReadChatResponse = try await APIClient.shared.request(
+                "/api/staff/chats/\(token)/read",
+                baseURL: server,
+                token: authToken,
+                method: "POST"
+            )
+            if refreshList {
+                await refreshChats(silent: true)
+            }
+        } catch {
+            // 下次实时事件或轮询会再次补偿已读状态。
+        }
     }
 
-    private func connectSocket() {
-        stopSocket()
+    private func refreshSelectedMessages(silent: Bool = true) async {
+        guard let token = selected?.token, loggedIn else { return }
+        do {
+            let response: ChatMessagesResponse = try await APIClient.shared.request(
+                "/api/staff/chats/\(token)/messages",
+                baseURL: server,
+                token: authToken
+            )
+            guard selected?.token == token else { return }
+            selected = response.session
+            messages = response.messages.sorted { $0.id < $1.id }
+            upsertSession(response.session)
+        } catch {
+            if !silent {
+                errorText = error.localizedDescription
+            }
+        }
+    }
+
+    private func syncNow() async {
+        await refreshChats(silent: true)
+        if selected != nil {
+            await refreshSelectedMessages()
+        }
+    }
+
+    private func startRealtime() {
+        stopRealtime()
+        connectSocket()
+        startSyncLoop()
+    }
+
+    private func startSyncLoop() {
+        syncTask?.cancel()
+        syncTask = Task { [weak self] in
+            var tick = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard !Task.isCancelled, let self, self.loggedIn else { return }
+                tick += 1
+
+                if self.selected != nil {
+                    await self.refreshSelectedMessages()
+                }
+                if self.selected == nil || tick.isMultiple(of: 2) {
+                    await self.refreshChats(silent: true)
+                }
+                if self.socket == nil {
+                    self.connectSocket()
+                }
+            }
+        }
+    }
+
+    private func connectSocket(force: Bool = false) {
+        guard loggedIn else { return }
+        if socket != nil, !force { return }
+        if force {
+            cancelSocket()
+        }
         guard
             let base = URL(string: server),
             var components = URLComponents(url: base, resolvingAgainstBaseURL: false)
@@ -220,19 +330,25 @@ final class ChatViewModel: ObservableObject {
         components.queryItems = [URLQueryItem(name: "token", value: authToken)]
         guard let url = components.url else { return }
 
-        let task = URLSession.shared.webSocketTask(with: url)
+        let session = URLSession(configuration: .default)
+        let task = session.webSocketTask(with: url)
+        socketSession = session
         socket = task
+        connected = false
         task.resume()
-        connected = true
 
         receiveTask = Task { [weak self] in
             await self?.receiveLoop(task)
         }
         heartbeatTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 25_000_000_000)
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
                 guard !Task.isCancelled, self?.socket === task else { return }
-                try? await task.send(.string("ping"))
+                do {
+                    try await task.send(.string("ping"))
+                } catch {
+                    return
+                }
             }
         }
     }
@@ -240,22 +356,29 @@ final class ChatViewModel: ObservableObject {
     private func receiveLoop(_ task: URLSessionWebSocketTask) async {
         while !Task.isCancelled, socket === task {
             do {
-                let message = try await task.receive()
-                guard case let .string(text) = message,
-                      let data = text.data(using: .utf8),
+                let received = try await task.receive()
+                let text: String
+                switch received {
+                case let .string(value):
+                    text = value
+                case let .data(data):
+                    guard let value = String(data: data, encoding: .utf8) else { continue }
+                    text = value
+                @unknown default:
+                    continue
+                }
+
+                guard let data = text.data(using: .utf8),
                       let event = try? JSONDecoder().decode(SocketEvent.self, from: data)
                 else { continue }
-
-                if event.type == "message" {
-                    await refreshChats()
-                    if event.session?.token == selected?.token,
-                       let incoming = event.message,
-                       !messages.contains(where: { $0.id == incoming.id }) {
-                        messages.append(incoming)
-                    }
-                }
+                handle(event)
             } catch {
                 guard socket === task else { return }
+                socket = nil
+                socketSession?.invalidateAndCancel()
+                socketSession = nil
+                heartbeatTask?.cancel()
+                heartbeatTask = nil
                 connected = false
                 scheduleReconnect()
                 return
@@ -263,16 +386,110 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    private func handle(_ event: SocketEvent) {
+        switch event.type {
+        case "connected", "pong":
+            connected = true
+
+        case "message":
+            connected = true
+            if let session = event.session {
+                upsertSession(session)
+            }
+            let token = event.session?.token ?? event.session_token
+            if token == selected?.token, let incoming = event.message {
+                appendOrReplace(incoming)
+                if incoming.sender_type == "visitor", let token {
+                    Task { [weak self] in
+                        await self?.markRead(token, refreshList: true)
+                    }
+                }
+            }
+
+        case "messages_read":
+            guard event.reader == "visitor" else { return }
+            let throughID = event.through_message_id ?? 0
+            messages = messages.map { message in
+                guard message.sentByAgent, message.id <= throughID else { return message }
+                return message.markingRead(at: event.read_at)
+            }
+
+        case "session_reopened":
+            if let session = event.session {
+                upsertSession(session)
+            }
+
+        case "session_closed":
+            let token = event.session?.token ?? event.session_token
+            if let token {
+                removeSession(token: token)
+            }
+
+        case "attachment_deleted":
+            let token = event.session?.token ?? event.session_token
+            if token == selected?.token {
+                Task { [weak self] in
+                    await self?.refreshSelectedMessages(silent: true)
+                }
+            }
+
+        default:
+            break
+        }
+    }
+
+    private func appendOrReplace(_ message: ChatMessage) {
+        if let index = messages.firstIndex(where: { $0.id == message.id }) {
+            messages[index] = message
+        } else {
+            messages.append(message)
+            messages.sort { $0.id < $1.id }
+        }
+    }
+
+    private func upsertSession(_ session: ChatSession) {
+        if session.is_closed == true {
+            removeSession(token: session.token)
+            return
+        }
+        if let index = chats.firstIndex(where: { $0.token == session.token }) {
+            chats[index] = session
+        } else {
+            chats.append(session)
+        }
+        chats = sortedChats(chats)
+        if selected?.token == session.token {
+            selected = session
+        }
+    }
+
+    private func removeSession(token: String) {
+        chats.removeAll { $0.token == token }
+        if selected?.token == token {
+            selected = nil
+            messages = []
+        }
+    }
+
+    private func sortedChats(_ rows: [ChatSession]) -> [ChatSession] {
+        rows.sorted { lhs, rhs in
+            let left = ChatDateFormatter.date(from: lhs.last_message_at) ?? .distantPast
+            let right = ChatDateFormatter.date(from: rhs.last_message_at) ?? .distantPast
+            if left == right { return lhs.id > rhs.id }
+            return left > right
+        }
+    }
+
     private func scheduleReconnect() {
         reconnectTask?.cancel()
         reconnectTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            guard !Task.isCancelled, let self, self.loggedIn else { return }
+            try? await Task.sleep(nanoseconds: 1_800_000_000)
+            guard !Task.isCancelled, let self, self.loggedIn, self.socket == nil else { return }
             self.connectSocket()
         }
     }
 
-    private func stopSocket() {
+    private func cancelSocket() {
         reconnectTask?.cancel()
         receiveTask?.cancel()
         heartbeatTask?.cancel()
@@ -281,7 +498,25 @@ final class ChatViewModel: ObservableObject {
         heartbeatTask = nil
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
+        socketSession?.invalidateAndCancel()
+        socketSession = nil
         connected = false
+    }
+
+    private func stopRealtime() {
+        syncTask?.cancel()
+        syncTask = nil
+        cancelSocket()
+    }
+
+    private func openPendingPushIfNeeded() async {
+        guard let token = UserDefaults.standard.string(forKey: "pendingPushSessionToken") else { return }
+        await open(token: token)
+    }
+
+    private func normalizedServer(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 }
 
@@ -298,4 +533,10 @@ private struct SocketEvent: Codable {
     let type: String
     let message: ChatMessage?
     let session: ChatSession?
+    let session_token: String?
+    let reader: String?
+    let through_message_id: Int?
+    let read_at: String?
+    let by: String?
 }
+

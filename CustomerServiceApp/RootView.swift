@@ -98,18 +98,35 @@ private struct MainView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    List(viewModel.chats) { chat in
-                        Button {
-                            Task {
-                                await viewModel.open(chat)
-                                showChat = true
+                    List {
+                        ForEach(viewModel.chats) { chat in
+                            Button {
+                                Task {
+                                    await viewModel.open(chat)
+                                    showChat = viewModel.selected != nil
+                                }
+                            } label: {
+                                ChatRow(chat: chat)
                             }
-                        } label: {
-                            ChatRow(chat: chat)
+                            .buttonStyle(.plain)
+                            .listRowInsets(EdgeInsets(top: 6, leading: 14, bottom: 6, trailing: 14))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button(role: .destructive) {
+                                    Task {
+                                        await viewModel.close(chat)
+                                    }
+                                } label: {
+                                    Label("结束服务", systemImage: "xmark.circle.fill")
+                                }
+                                .disabled(viewModel.closingTokens.contains(chat.token))
+                            }
                         }
-                        .buttonStyle(.plain)
                     }
                     .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .background(Color(.systemGroupedBackground))
                     .refreshable {
                         await viewModel.refreshChats()
                     }
@@ -144,9 +161,7 @@ private struct MainView: View {
                 ChatView()
             }
             .onChange(of: viewModel.selected?.token) { token in
-                if token != nil {
-                    showChat = true
-                }
+                showChat = token != nil
             }
         }
     }
@@ -158,37 +173,55 @@ private struct ChatRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Circle()
-                .fill(.blue.gradient)
-                .frame(width: 44, height: 44)
+                .fill(Color.blue.gradient)
+                .frame(width: 48, height: 48)
                 .overlay {
-                    Text(String(chat.visitor_name.prefix(1)))
+                    Text(chat.avatarText)
                         .foregroundStyle(.white)
                         .bold()
                 }
 
             VStack(alignment: .leading, spacing: 5) {
                 HStack {
-                    Text(chat.visitor_name)
+                    Text(chat.displayName)
                         .font(.headline)
+                        .lineLimit(1)
                     Spacer()
+                    Text(ChatDateFormatter.conversationTime(chat.last_message_at))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                     if chat.unread_agent > 0 {
                         Text("\(chat.unread_agent)")
                             .font(.caption2.bold())
                             .foregroundStyle(.white)
-                            .padding(6)
-                            .background(.red, in: Circle())
+                            .frame(minWidth: 20, minHeight: 20)
+                            .padding(.horizontal, 2)
+                            .background(.red, in: Capsule())
                     }
                 }
-                Text(chat.last_message?.content ?? chat.ip)
+                Text(previewText)
                     .lineLimit(1)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                Text("IP \(chat.ip)")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
             }
         }
+        .padding(14)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+        }
         .contentShape(Rectangle())
+    }
+
+    private var previewText: String {
+        guard let message = chat.last_message else { return "新会话" }
+        switch message.kind {
+        case "image": return "[图片]"
+        case "video": return "[视频]"
+        case "attachment_deleted": return "[附件已删除]"
+        default: return message.content
+        }
     }
 }
 
@@ -212,6 +245,12 @@ private struct ChatView: View {
                 .onChange(of: viewModel.messages.count) { _ in
                     guard let id = viewModel.messages.last?.id else { return }
                     withAnimation {
+                        proxy.scrollTo(id, anchor: .bottom)
+                    }
+                }
+                .onAppear {
+                    guard let id = viewModel.messages.last?.id else { return }
+                    DispatchQueue.main.async {
                         proxy.scrollTo(id, anchor: .bottom)
                     }
                 }
@@ -249,7 +288,8 @@ private struct ChatView: View {
             }
             .padding()
         }
-        .navigationTitle(viewModel.selected?.visitor_name ?? "会话")
+        .background(Color(.systemGroupedBackground))
+        .navigationTitle(viewModel.selected?.displayName ?? "会话")
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -258,7 +298,8 @@ private struct MessageBubble: View {
     let message: ChatMessage
     let server: String
 
-    private var isAgent: Bool { message.sender_type == "agent" }
+    private var isAgent: Bool { message.sentByAgent }
+    private var isSystem: Bool { message.sender_type == "system" }
 
     private var attachmentURL: URL? {
         if let absolute = URL(string: message.content), absolute.scheme != nil {
@@ -269,28 +310,83 @@ private struct MessageBubble: View {
     }
 
     var body: some View {
-        HStack {
-            if isAgent { Spacer() }
-            Group {
-                if message.kind == "image", let url = attachmentURL {
-                    AsyncImage(url: url) { image in
-                        image.resizable().scaledToFit()
-                    } placeholder: {
-                        ProgressView()
-                            .frame(width: 100, height: 100)
-                    }
-                    .frame(maxWidth: 240, maxHeight: 260)
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
-                } else {
+        Group {
+            if isSystem {
+                VStack(spacing: 4) {
                     Text(message.content)
-                        .padding(11)
-                        .background(isAgent ? Color.blue : Color(.secondarySystemBackground))
-                        .foregroundStyle(isAgent ? .white : .primary)
-                        .clipShape(RoundedRectangle(cornerRadius: 15))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(Color(.tertiarySystemFill), in: Capsule())
+                    Text(ChatDateFormatter.messageTime(message.created_at))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                HStack(alignment: .bottom, spacing: 8) {
+                    if isAgent { Spacer(minLength: 42) }
+
+                    if !isAgent {
+                        Circle()
+                            .fill(Color.orange.gradient)
+                            .frame(width: 30, height: 30)
+                            .overlay {
+                                Text("访")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.white)
+                            }
+                    }
+
+                    VStack(alignment: isAgent ? .trailing : .leading, spacing: 4) {
+                        bubbleBody
+
+                        HStack(spacing: 7) {
+                            Text(ChatDateFormatter.messageTime(message.created_at))
+                            if isAgent {
+                                Text(message.is_read == true ? "已读" : "未读")
+                                    .foregroundStyle(message.is_read == true ? Color.green : Color.secondary)
+                            }
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    }
+
+                    if !isAgent { Spacer(minLength: 42) }
                 }
             }
-            .frame(maxWidth: 280, alignment: isAgent ? .trailing : .leading)
-            if !isAgent { Spacer() }
+        }
+    }
+
+    @ViewBuilder
+    private var bubbleBody: some View {
+        if message.kind == "image", let url = attachmentURL {
+            AsyncImage(url: url) { image in
+                image.resizable().scaledToFit()
+            } placeholder: {
+                ProgressView()
+                    .frame(width: 100, height: 100)
+            }
+            .frame(maxWidth: 240, maxHeight: 260)
+            .background(Color(.secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        } else if message.kind == "video", let url = attachmentURL {
+            Link(destination: url) {
+                Label("查看视频", systemImage: "play.rectangle.fill")
+                    .padding(12)
+                    .frame(maxWidth: 240)
+            }
+            .background(isAgent ? Color.blue : Color(.secondarySystemBackground))
+            .foregroundStyle(isAgent ? .white : .primary)
+            .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        } else {
+            Text(message.content)
+                .textSelection(.enabled)
+                .padding(11)
+                .background(isAgent ? Color.blue : Color(.secondarySystemBackground))
+                .foregroundStyle(isAgent ? .white : .primary)
+                .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
         }
     }
 }
