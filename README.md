@@ -1,6 +1,6 @@
 # CustomerService iOS 客服端
 
-原生 SwiftUI 客服客户端，面向 `kefu V1.0.8` 服务端接口：
+原生 SwiftUI 客服客户端 V1.0.9，继续兼容 `kefu V1.0.8` 服务端接口：
 
 - 前台通过 WebSocket 实时接收消息并自动重连；
 - 后台和锁屏通过 APNs 显示声音、角标和横幅通知；
@@ -9,11 +9,12 @@
 - 显示消息时间与访客已读回执；
 - 使用地区、运营商和 IP 生成可辨识的访客名称；
 - WebSocket 到达时立即更新界面，并带有轮询补偿机制；
+- 图片和短视频可在 App 内点击预览，支持双指缩放、放大后拖动、双击放大/复位，并可点右上角关闭；
 - 最低支持 iOS 16，包名为 `com.yuyanfriends.app`。
 
 ## GitHub Actions 构建
 
-仓库使用 XcodeGen 在 macOS Runner 上生成 Xcode 工程，并同时输出完全未签名包和爱思兼容待重签包。构建过程不读取证书或描述文件。成功后进入 **Actions → 构建爱思兼容待重签 IPA → Artifacts**，优先下载并使用 `CustomerService-iOS-1.0.8-resignable.ipa`。
+仓库使用 XcodeGen 在 macOS Runner 上生成 Xcode 工程，并同时输出完全未签名包和爱思兼容待重签包。构建过程不读取证书或描述文件。成功后进入 **Actions → 构建爱思兼容待重签 IPA → Artifacts**，优先下载并使用 `CustomerService-iOS-1.0.9-resignable.ipa`。
 
 ## 实时通知说明
 

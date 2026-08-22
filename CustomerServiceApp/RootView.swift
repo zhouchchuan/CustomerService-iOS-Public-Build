@@ -1,3 +1,4 @@
+import AVKit
 import PhotosUI
 import SwiftUI
 
@@ -229,6 +230,7 @@ private struct ChatView: View {
     @EnvironmentObject private var viewModel: ChatViewModel
     @State private var text = ""
     @State private var photoItem: PhotosPickerItem?
+    @State private var mediaPreview: MediaPreviewItem?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -236,7 +238,11 @@ private struct ChatView: View {
                 ScrollView {
                     LazyVStack(spacing: 10) {
                         ForEach(viewModel.messages) { message in
-                            MessageBubble(message: message, server: viewModel.server)
+                            MessageBubble(
+                                message: message,
+                                server: viewModel.server,
+                                onPreview: { mediaPreview = $0 }
+                            )
                                 .id(message.id)
                         }
                     }
@@ -291,12 +297,16 @@ private struct ChatView: View {
         .background(Color(.systemGroupedBackground))
         .navigationTitle(viewModel.selected?.displayName ?? "会话")
         .navigationBarTitleDisplayMode(.inline)
+        .fullScreenCover(item: $mediaPreview) { item in
+            MediaPreviewView(item: item)
+        }
     }
 }
 
 private struct MessageBubble: View {
     let message: ChatMessage
     let server: String
+    let onPreview: (MediaPreviewItem) -> Void
 
     private var isAgent: Bool { message.sentByAgent }
     private var isSystem: Bool { message.sender_type == "system" }
@@ -362,21 +372,30 @@ private struct MessageBubble: View {
     @ViewBuilder
     private var bubbleBody: some View {
         if message.kind == "image", let url = attachmentURL {
-            AsyncImage(url: url) { image in
-                image.resizable().scaledToFit()
-            } placeholder: {
-                ProgressView()
-                    .frame(width: 100, height: 100)
+            Button {
+                onPreview(MediaPreviewItem(kind: .image, url: url))
+            } label: {
+                AsyncImage(url: url) { image in
+                    image.resizable().scaledToFit()
+                } placeholder: {
+                    ProgressView()
+                        .frame(width: 100, height: 100)
+                }
+                .frame(maxWidth: 240, maxHeight: 260)
+                .background(Color(.secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
-            .frame(maxWidth: 240, maxHeight: 260)
-            .background(Color(.secondarySystemBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .buttonStyle(.plain)
+            .accessibilityLabel("查看并缩放图片")
         } else if message.kind == "video", let url = attachmentURL {
-            Link(destination: url) {
+            Button {
+                onPreview(MediaPreviewItem(kind: .video, url: url))
+            } label: {
                 Label("查看视频", systemImage: "play.rectangle.fill")
                     .padding(12)
                     .frame(maxWidth: 240)
             }
+            .buttonStyle(.plain)
             .background(isAgent ? Color.blue : Color(.secondarySystemBackground))
             .foregroundStyle(isAgent ? .white : .primary)
             .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
@@ -388,6 +407,180 @@ private struct MessageBubble: View {
                 .foregroundStyle(isAgent ? .white : .primary)
                 .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
         }
+    }
+}
+
+private struct MediaPreviewItem: Identifiable {
+    enum Kind: String {
+        case image
+        case video
+    }
+
+    let kind: Kind
+    let url: URL
+
+    var id: String {
+        "\(kind.rawValue):\(url.absoluteString)"
+    }
+}
+
+private struct MediaPreviewView: View {
+    @Environment(\.dismiss) private var dismiss
+    let item: MediaPreviewItem
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.black
+                .ignoresSafeArea()
+
+            Group {
+                switch item.kind {
+                case .image:
+                    ZoomableMediaContainer {
+                        AsyncImage(url: item.url) { phase in
+                            switch phase {
+                            case .empty:
+                                ProgressView()
+                                    .tint(.white)
+                            case .success(let image):
+                                image
+                                    .resizable()
+                                    .scaledToFit()
+                            case .failure:
+                                VStack(spacing: 10) {
+                                    Image(systemName: "photo.badge.exclamationmark")
+                                        .font(.system(size: 42))
+                                    Text("图片加载失败")
+                                        .font(.headline)
+                                    Text("请检查网络后重新打开")
+                                        .font(.footnote)
+                                }
+                                .foregroundStyle(.white)
+                            @unknown default:
+                                EmptyView()
+                            }
+                        }
+                    }
+                case .video:
+                    VideoMediaPreview(url: item.url)
+                }
+            }
+            .padding(.top, 44)
+
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 42, height: 42)
+                    .background(.black.opacity(0.65), in: Circle())
+                    .overlay {
+                        Circle()
+                            .stroke(.white.opacity(0.22), lineWidth: 1)
+                    }
+            }
+            .accessibilityLabel("关闭预览")
+            .padding(.top, 10)
+            .padding(.trailing, 14)
+            .zIndex(2)
+        }
+        .statusBarHidden(true)
+    }
+}
+
+private struct VideoMediaPreview: View {
+    @State private var player: AVPlayer
+
+    init(url: URL) {
+        _player = State(initialValue: AVPlayer(url: url))
+    }
+
+    var body: some View {
+        ZoomableMediaContainer {
+            VideoPlayer(player: player)
+                .background(Color.black)
+        }
+        .onAppear {
+            player.play()
+        }
+        .onDisappear {
+            player.pause()
+        }
+    }
+}
+
+private struct ZoomableMediaContainer<Content: View>: View {
+    private let content: Content
+
+    @State private var scale: CGFloat = 1
+    @State private var committedScale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var committedOffset: CGSize = .zero
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            content
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .scaleEffect(scale)
+                .offset(offset)
+                .contentShape(Rectangle())
+                .simultaneousGesture(magnificationGesture)
+                .simultaneousGesture(dragGesture)
+                .onTapGesture(count: 2) {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        if scale > 1.05 {
+                            resetTransform()
+                        } else {
+                            scale = 2.5
+                            committedScale = 2.5
+                        }
+                    }
+                }
+        }
+        .clipped()
+    }
+
+    private var magnificationGesture: some Gesture {
+        MagnificationGesture()
+            .onChanged { value in
+                scale = min(max(committedScale * value, 1), 5)
+            }
+            .onEnded { _ in
+                committedScale = scale
+                if scale <= 1.01 {
+                    resetTransform()
+                }
+            }
+    }
+
+    private var dragGesture: some Gesture {
+        DragGesture(minimumDistance: 8)
+            .onChanged { value in
+                guard scale > 1.01 else { return }
+                offset = CGSize(
+                    width: committedOffset.width + value.translation.width,
+                    height: committedOffset.height + value.translation.height
+                )
+            }
+            .onEnded { _ in
+                guard scale > 1.01 else {
+                    resetTransform()
+                    return
+                }
+                committedOffset = offset
+            }
+    }
+
+    private func resetTransform() {
+        scale = 1
+        committedScale = 1
+        offset = .zero
+        committedOffset = .zero
     }
 }
 
