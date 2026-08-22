@@ -1,4 +1,4 @@
-name: 构建未签名 IPA
+name: 构建爱思兼容待重签 IPA
 
 on:
   push:
@@ -10,12 +10,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: ios-unsigned-ipa-${{ github.ref }}
+  group: ios-resignable-ipa-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build-unsigned-ipa:
-    name: 编译未签名 IPA
+  build-resignable-ipa:
+    name: 编译爱思兼容待重签 IPA
     runs-on: macos-15
     timeout-minutes: 35
     env:
@@ -53,7 +53,7 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=''
 
-      - name: 封装未签名 IPA
+      - name: 封装未签名和占位签名 IPA
         shell: bash
         run: |
           set -euo pipefail
@@ -64,50 +64,79 @@ jobs:
           rm -rf "$APP_PATH/_CodeSignature"
           rm -f "$APP_PATH/embedded.mobileprovision"
 
-          PACKAGE_ROOT="$RUNNER_TEMP/unsigned-package"
-          mkdir -p "$PACKAGE_ROOT/Payload" build/ipa
-          ditto "$APP_PATH" "$PACKAGE_ROOT/Payload/CustomerServiceApp.app"
+          UNSIGNED_ROOT="$RUNNER_TEMP/unsigned-package"
+          RESIGNABLE_ROOT="$RUNNER_TEMP/resignable-package"
+          mkdir -p "$UNSIGNED_ROOT/Payload" "$RESIGNABLE_ROOT/Payload" build/ipa
+          ditto "$APP_PATH" "$UNSIGNED_ROOT/Payload/CustomerServiceApp.app"
+          ditto "$APP_PATH" "$RESIGNABLE_ROOT/Payload/CustomerServiceApp.app"
+
+          codesign \
+            --force \
+            --deep \
+            --sign - \
+            --timestamp=none \
+            "$RESIGNABLE_ROOT/Payload/CustomerServiceApp.app"
+
           (
-            cd "$PACKAGE_ROOT"
+            cd "$UNSIGNED_ROOT"
             /usr/bin/zip -qry "$GITHUB_WORKSPACE/build/ipa/CustomerService-iOS-1.0.8-unsigned.ipa" Payload
           )
+          (
+            cd "$RESIGNABLE_ROOT"
+            /usr/bin/zip -qry "$GITHUB_WORKSPACE/build/ipa/CustomerService-iOS-1.0.8-resignable.ipa" Payload
+          )
 
-      - name: 校验未签名状态和包名
+      - name: 校验包结构、占位签名和包名
         shell: bash
         run: |
           set -euo pipefail
-          FINAL_IPA="build/ipa/CustomerService-iOS-1.0.8-unsigned.ipa"
-          [[ -f "$FINAL_IPA" ]]
+          UNSIGNED_IPA="build/ipa/CustomerService-iOS-1.0.8-unsigned.ipa"
+          RESIGNABLE_IPA="build/ipa/CustomerService-iOS-1.0.8-resignable.ipa"
+          [[ -f "$UNSIGNED_IPA" ]]
+          [[ -f "$RESIGNABLE_IPA" ]]
 
-          VERIFY_DIR="$RUNNER_TEMP/verify-unsigned-ipa"
-          mkdir -p "$VERIFY_DIR"
-          unzip -q "$FINAL_IPA" -d "$VERIFY_DIR"
-          APP_PATH=$(find "$VERIFY_DIR/Payload" -maxdepth 1 -type d -name '*.app' -print -quit)
-          [[ -n "$APP_PATH" ]]
-          [[ ! -e "$APP_PATH/_CodeSignature" ]]
-          [[ ! -e "$APP_PATH/embedded.mobileprovision" ]]
-          [[ -x "$APP_PATH/CustomerServiceApp" ]]
+          UNSIGNED_VERIFY_DIR="$RUNNER_TEMP/verify-unsigned-ipa"
+          RESIGNABLE_VERIFY_DIR="$RUNNER_TEMP/verify-resignable-ipa"
+          mkdir -p "$UNSIGNED_VERIFY_DIR" "$RESIGNABLE_VERIFY_DIR"
+          unzip -q "$UNSIGNED_IPA" -d "$UNSIGNED_VERIFY_DIR"
+          unzip -q "$RESIGNABLE_IPA" -d "$RESIGNABLE_VERIFY_DIR"
+          UNSIGNED_APP=$(find "$UNSIGNED_VERIFY_DIR/Payload" -maxdepth 1 -type d -name '*.app' -print -quit)
+          RESIGNABLE_APP=$(find "$RESIGNABLE_VERIFY_DIR/Payload" -maxdepth 1 -type d -name '*.app' -print -quit)
+          [[ -n "$UNSIGNED_APP" ]]
+          [[ -n "$RESIGNABLE_APP" ]]
+          [[ ! -e "$UNSIGNED_APP/_CodeSignature" ]]
+          [[ ! -e "$UNSIGNED_APP/embedded.mobileprovision" ]]
+          [[ -e "$RESIGNABLE_APP/_CodeSignature/CodeResources" ]]
+          [[ ! -e "$RESIGNABLE_APP/embedded.mobileprovision" ]]
+          [[ -x "$UNSIGNED_APP/CustomerServiceApp" ]]
+          [[ -x "$RESIGNABLE_APP/CustomerServiceApp" ]]
 
-          if codesign --verify --deep --strict "$APP_PATH" >/dev/null 2>&1; then
+          if codesign --verify --deep --strict "$UNSIGNED_APP" >/dev/null 2>&1; then
             echo "错误：App 仍然带有有效签名。"
             exit 1
           fi
+          codesign --verify --deep --strict --verbose=2 "$RESIGNABLE_APP"
 
-          ACTUAL_BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Info.plist")
+          ACTUAL_BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$RESIGNABLE_APP/Info.plist")
+          ACTUAL_EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$RESIGNABLE_APP/Info.plist")
           [[ "$ACTUAL_BUNDLE_ID" == "$EXPECTED_BUNDLE_ID" ]]
+          [[ "$ACTUAL_EXECUTABLE" == "CustomerServiceApp" ]]
 
-          shasum -a 256 "$FINAL_IPA" > "$FINAL_IPA.sha256.txt"
+          shasum -a 256 "$UNSIGNED_IPA" > "$UNSIGNED_IPA.sha256.txt"
+          shasum -a 256 "$RESIGNABLE_IPA" > "$RESIGNABLE_IPA.sha256.txt"
           {
             echo "bundle_id=$ACTUAL_BUNDLE_ID"
-            echo "signed=false"
+            echo "bundle_executable=$ACTUAL_EXECUTABLE"
+            echo "unsigned_ipa_signed=false"
+            echo "resignable_ipa_signature=ad-hoc-placeholder"
             echo "embedded_profile=false"
             echo "git_commit=$GITHUB_SHA"
           } > build/ipa/build-info.txt
 
-      - name: 上传未签名 IPA
+      - name: 上传待重签 IPA
         uses: actions/upload-artifact@v4
         with:
-          name: CustomerService-iOS-1.0.8-unsigned
+          name: CustomerService-iOS-1.0.8-resignable
           path: build/ipa/
           if-no-files-found: error
           retention-days: 30
