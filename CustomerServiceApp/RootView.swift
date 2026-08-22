@@ -12,7 +12,7 @@ struct RootView: View {
                 LoginView()
             }
         }
-        .animation(.2, value: viewModel.loggedIn)
+        .animation(.easeInOut(duration: 0.2), value: viewModel.loggedIn)
     }
 }
 
@@ -294,3 +294,4 @@ private struct MessageBubble: View {
         }
     }
 }
+
