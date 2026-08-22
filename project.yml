@@ -1,0 +1,42 @@
+name: CustomerServiceApp
+
+options:
+  bundleIdPrefix: com.yuyanfriends
+  deploymentTarget:
+    iOS: "16.0"
+
+settings:
+  base:
+    SWIFT_VERSION: 5.0
+    IPHONEOS_DEPLOYMENT_TARGET: 16.0
+
+targets:
+  CustomerServiceApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: CustomerServiceApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.yuyanfriends.app
+        PRODUCT_NAME: CustomerServiceApp
+        MARKETING_VERSION: 1.0.8
+        CURRENT_PROJECT_VERSION: 2
+        DEVELOPMENT_TEAM: XTGL9G753G
+        INFOPLIST_FILE: CustomerServiceApp/Info.plist
+        CODE_SIGN_ENTITLEMENTS: CustomerServiceApp/CustomerServiceApp.entitlements
+        CODE_SIGN_STYLE: Manual
+        PROVISIONING_PROFILE_SPECIFIER: com.yuyanfriends.app
+        CODE_SIGN_IDENTITY: iPhone Distribution
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTS_MACCATALYST: NO
+
+schemes:
+  CustomerServiceApp:
+    build:
+      targets:
+        CustomerServiceApp: all
+    archive:
+      config: Release

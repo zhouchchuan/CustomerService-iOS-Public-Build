@@ -21,4 +21,3 @@
 ## 实时通知说明
 
 IPA 使用原生 APNs，不在 `WKWebView` 中模拟网页 Web Push。前台实时消息依赖服务端 `/ws/staff`；锁屏/后台推送还需服务端启用 APNs，并将 `APPLE_BUNDLE_ID` 设为 `com.yuyanfriends.app`。签名证书只用于构建 App，服务端向苹果推送仍需单独的 APNs `.p8` 密钥与 Key ID。
-
