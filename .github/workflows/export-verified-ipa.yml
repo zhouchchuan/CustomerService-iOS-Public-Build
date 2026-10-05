@@ -1,0 +1,77 @@
+name: Temporary export of verified IPA
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/export-verified-ipa.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  export-ipa:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DOWNLOAD_BRANCH: downloads/ios-1.0.10
+    steps:
+      - name: Download the already verified artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run download 37275268948 --repo "$GITHUB_REPOSITORY" \
+            --name CustomerService-iOS-1.0.10-resignable --dir exported
+
+      - name: Verify checksum and original build provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, plistlib, zipfile
+          root = Path('exported')
+          ipa = root/'CustomerService-iOS-1.0.10-resignable.ipa'
+          expected = Path(str(ipa)+'.sha256.txt').read_text().split()[0]
+          assert hashlib.sha256(ipa.read_bytes()).hexdigest() == expected
+          info = (root/'build-info.txt').read_text()
+          assert 'git_commit=8ea328e0d45bbfc1fd5156951b1827fed2a5a5bd' in info
+          with zipfile.ZipFile(ipa) as z:
+              assert z.testzip() is None
+              plist = plistlib.loads(z.read('Payload/CustomerServiceApp.app/Info.plist'))
+              assert plist['CFBundleIdentifier'] == 'com.yuyanfriends.app'
+              assert plist['CFBundleShortVersionString'] == '1.0.10'
+              assert plist['CFBundleVersion'] == '5'
+              assert not any(n.endswith('.p12') or n.endswith('.mobileprovision') for n in z.namelist())
+          print('Verified IPA SHA256:', expected)
+          PY
+
+      - name: Export only IPA and build metadata to the download branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$DOWNLOAD_BRANCH" >/dev/null 2>&1; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/heads/$DOWNLOAD_BRANCH" -f sha="$GITHUB_SHA" >/dev/null
+          fi
+          for FILE in CustomerService-iOS-1.0.10-resignable.ipa CustomerService-iOS-1.0.10-resignable.ipa.sha256.txt build-info.txt; do
+            SHA=$(gh api "repos/$GITHUB_REPOSITORY/contents/$FILE?ref=$DOWNLOAD_BRANCH" --jq .sha 2>/dev/null || true)
+            export FILE SHA
+            python3 - <<'PY'
+          import base64, json, os, pathlib
+          payload = {
+              'message': 'build: export verified IPA for local signing',
+              'branch': os.environ['DOWNLOAD_BRANCH'],
+              'content': base64.b64encode(pathlib.Path('exported', os.environ['FILE']).read_bytes()).decode()
+          }
+          if os.environ.get('SHA'):
+              payload['sha'] = os.environ['SHA']
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'ipa-export.json').write_text(json.dumps(payload))
+          PY
+            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$FILE" \
+              --input "$RUNNER_TEMP/ipa-export.json" >/dev/null
+          done
