@@ -1,0 +1,8 @@
+bundle_id=com.yuyanfriends.app
+bundle_executable=CustomerServiceApp
+marketing_version=1.0.10
+build_number=5
+unsigned_ipa_signed=false
+resignable_ipa_signature=ad-hoc-placeholder
+embedded_profile=false
+git_commit=8ea328e0d45bbfc1fd5156951b1827fed2a5a5bd
