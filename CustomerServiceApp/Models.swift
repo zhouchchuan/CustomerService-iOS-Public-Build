@@ -78,6 +78,11 @@ struct ChatSession: Codable, Identifiable, Hashable {
               text != "0",
               text.lowercased() != "null"
         else { return nil }
+        // Older servers accidentally returned these country codes as the ISP.
+        // Keep the location and IP visible while the server is being upgraded.
+        if ["CN", "HK", "MO", "TW"].contains(text.uppercased()) {
+            return nil
+        }
         text = text
             .replacingOccurrences(of: "中国电信", with: "电信")
             .replacingOccurrences(of: "中国移动", with: "移动")

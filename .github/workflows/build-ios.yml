@@ -25,6 +25,13 @@ jobs:
       - name: 获取源码
         uses: actions/checkout@v4
 
+      - name: 验证地域与运营商显示
+        shell: bash
+        run: |
+          set -euo pipefail
+          swiftc CustomerServiceApp/Models.swift tests/LocationDisplayTests.swift -o "$RUNNER_TEMP/location-display-tests"
+          "$RUNNER_TEMP/location-display-tests"
+
       - name: 生成 Xcode 工程
         shell: bash
         run: |
@@ -79,19 +86,19 @@ jobs:
 
           (
             cd "$UNSIGNED_ROOT"
-            /usr/bin/zip -qry "$GITHUB_WORKSPACE/build/ipa/CustomerService-iOS-1.0.9-unsigned.ipa" Payload
+            /usr/bin/zip -qry "$GITHUB_WORKSPACE/build/ipa/CustomerService-iOS-1.0.10-unsigned.ipa" Payload
           )
           (
             cd "$RESIGNABLE_ROOT"
-            /usr/bin/zip -qry "$GITHUB_WORKSPACE/build/ipa/CustomerService-iOS-1.0.9-resignable.ipa" Payload
+            /usr/bin/zip -qry "$GITHUB_WORKSPACE/build/ipa/CustomerService-iOS-1.0.10-resignable.ipa" Payload
           )
 
       - name: 校验包结构、占位签名和包名
         shell: bash
         run: |
           set -euo pipefail
-          UNSIGNED_IPA="build/ipa/CustomerService-iOS-1.0.9-unsigned.ipa"
-          RESIGNABLE_IPA="build/ipa/CustomerService-iOS-1.0.9-resignable.ipa"
+          UNSIGNED_IPA="build/ipa/CustomerService-iOS-1.0.10-unsigned.ipa"
+          RESIGNABLE_IPA="build/ipa/CustomerService-iOS-1.0.10-resignable.ipa"
           [[ -f "$UNSIGNED_IPA" ]]
           [[ -f "$RESIGNABLE_IPA" ]]
 
@@ -127,8 +134,8 @@ jobs:
           {
             echo "bundle_id=$ACTUAL_BUNDLE_ID"
             echo "bundle_executable=$ACTUAL_EXECUTABLE"
-            echo "marketing_version=1.0.9"
-            echo "build_number=4"
+            echo "marketing_version=1.0.10"
+            echo "build_number=5"
             echo "unsigned_ipa_signed=false"
             echo "resignable_ipa_signature=ad-hoc-placeholder"
             echo "embedded_profile=false"
@@ -138,7 +145,7 @@ jobs:
       - name: 上传待重签 IPA
         uses: actions/upload-artifact@v4
         with:
-          name: CustomerService-iOS-1.0.9-resignable
+          name: CustomerService-iOS-1.0.10-resignable
           path: build/ipa/
           if-no-files-found: error
           retention-days: 30
