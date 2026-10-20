@@ -51,6 +51,10 @@ private struct LoginView: View {
                     }
                     .padding(.top, 12)
 
+                    Label("保持登录 · 不会因时间到期退出", systemImage: "checkmark.circle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.green)
+
                     if !viewModel.errorText.isEmpty {
                         Text(viewModel.errorText)
                             .font(.footnote)
@@ -60,18 +64,19 @@ private struct LoginView: View {
                     Button {
                         Task { await viewModel.login() }
                     } label: {
-                        Text("登录")
+                        Text(viewModel.isLoggingIn ? "正在登录…" : "登录")
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 10)
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
-                    .disabled(viewModel.server.isEmpty || viewModel.username.isEmpty || viewModel.password.isEmpty)
+                    .disabled(viewModel.isLoggingIn || viewModel.server.isEmpty || viewModel.username.isEmpty || viewModel.password.isEmpty)
 
-                    Text("登录成功后 App 会申请系统通知权限。前台消息由 WebSocket 实时接收，后台与锁屏通知由 APNs 接收。")
+                    Text("登录后自动保持登录，网络恢复后自动重连。后台与锁屏通知需要服务器已开通苹果推送。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .padding(.top, 8)
+                    Text("V1.0.11").font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(24)
             }

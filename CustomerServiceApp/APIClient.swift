@@ -4,6 +4,11 @@ enum APIError: LocalizedError {
     case invalidServer
     case http(Int, String)
 
+    var requiresLogin: Bool {
+        if case .http(401, _) = self { return true }
+        return false
+    }
+
     var errorDescription: String? {
         switch self {
         case .invalidServer:
@@ -19,6 +24,11 @@ actor APIClient {
 
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
+    private let session: URLSession
+
+    init(session: URLSession = .shared) {
+        self.session = session
+    }
 
     func request<T: Decodable>(
         _ path: String,
@@ -43,7 +53,7 @@ actor APIClient {
             request.httpBody = try encoder.encode(AnyEncodable(body))
         }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         try validate(response, data: data)
         return try decoder.decode(T.self, from: data)
     }
@@ -68,7 +78,7 @@ actor APIClient {
         body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
         request.httpBody = body
 
-        let (responseData, response) = try await URLSession.shared.data(for: request)
+        let (responseData, response) = try await session.data(for: request)
         try validate(response, data: responseData)
         return try decoder.decode(ChatMessage.self, from: responseData)
     }

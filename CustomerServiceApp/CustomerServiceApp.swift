@@ -14,9 +14,10 @@ struct CustomerServiceApp: App {
                     await viewModel.restore()
                 }
                 .onChange(of: scenePhase) { phase in
-                    guard phase == .active else { return }
-                    Task {
-                        await viewModel.becameActive()
+                    if phase == .active {
+                        Task { await viewModel.becameActive() }
+                    } else if phase == .background {
+                        viewModel.enteredBackground()
                     }
                 }
         }

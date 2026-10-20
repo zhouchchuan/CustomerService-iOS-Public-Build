@@ -43,6 +43,18 @@ jobs:
           xcodegen generate --spec project.yml
           xcodebuild -project CustomerServiceApp.xcodeproj -scheme CustomerServiceApp -showBuildSettings >/dev/null
 
+      - name: 验证登录保留与断网恢复
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for group in d["devices"].values() for v in group if v["name"].startswith("iPhone")))')
+          xcodebuild test \
+            -project CustomerServiceApp.xcodeproj -scheme CustomerServiceApp \
+            -destination "platform=iOS Simulator,id=$DEVICE_ID" \
+            -parallel-testing-enabled NO \
+            -derivedDataPath "$RUNNER_TEMP/TestDerivedData" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=''
+
       - name: 编译未签名 App
         shell: bash
         run: |
@@ -86,19 +98,19 @@ jobs:
 
           (
             cd "$UNSIGNED_ROOT"
-            /usr/bin/zip -qry "$GITHUB_WORKSPACE/build/ipa/CustomerService-iOS-1.0.10-unsigned.ipa" Payload
+            /usr/bin/zip -qry "$GITHUB_WORKSPACE/build/ipa/CustomerService-iOS-1.0.11-unsigned.ipa" Payload
           )
           (
             cd "$RESIGNABLE_ROOT"
-            /usr/bin/zip -qry "$GITHUB_WORKSPACE/build/ipa/CustomerService-iOS-1.0.10-resignable.ipa" Payload
+            /usr/bin/zip -qry "$GITHUB_WORKSPACE/build/ipa/CustomerService-iOS-1.0.11-resignable.ipa" Payload
           )
 
       - name: 校验包结构、占位签名和包名
         shell: bash
         run: |
           set -euo pipefail
-          UNSIGNED_IPA="build/ipa/CustomerService-iOS-1.0.10-unsigned.ipa"
-          RESIGNABLE_IPA="build/ipa/CustomerService-iOS-1.0.10-resignable.ipa"
+          UNSIGNED_IPA="build/ipa/CustomerService-iOS-1.0.11-unsigned.ipa"
+          RESIGNABLE_IPA="build/ipa/CustomerService-iOS-1.0.11-resignable.ipa"
           [[ -f "$UNSIGNED_IPA" ]]
           [[ -f "$RESIGNABLE_IPA" ]]
 
@@ -134,8 +146,8 @@ jobs:
           {
             echo "bundle_id=$ACTUAL_BUNDLE_ID"
             echo "bundle_executable=$ACTUAL_EXECUTABLE"
-            echo "marketing_version=1.0.10"
-            echo "build_number=5"
+            echo "marketing_version=1.0.11"
+            echo "build_number=6"
             echo "unsigned_ipa_signed=false"
             echo "resignable_ipa_signature=ad-hoc-placeholder"
             echo "embedded_profile=false"
@@ -145,7 +157,7 @@ jobs:
       - name: 上传待重签 IPA
         uses: actions/upload-artifact@v4
         with:
-          name: CustomerService-iOS-1.0.10-resignable
+          name: CustomerService-iOS-1.0.11-resignable
           path: build/ipa/
           if-no-files-found: error
           retention-days: 30

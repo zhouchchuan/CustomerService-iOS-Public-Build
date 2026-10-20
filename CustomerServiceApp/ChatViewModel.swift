@@ -15,8 +15,15 @@ final class ChatViewModel: ObservableObject {
     @Published var messages: [ChatMessage] = []
     @Published var errorText = ""
     @Published var connected = false
+    @Published private(set) var isLoggingIn = false
     @Published private(set) var closingTokens: Set<String> = []
 
+    private let api: APIClient
+    private let defaults: UserDefaults
+    private var restoring = false
+    private var restoreTask: Task<Void, Never>?
+    private var lastSocketActivity = Date()
+    private var isForeground = true
     private var socket: URLSessionWebSocketTask?
     private var socketSession: URLSession?
     private var receiveTask: Task<Void, Never>?
@@ -25,7 +32,12 @@ final class ChatViewModel: ObservableObject {
     private var syncTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
 
-    init() {
+    init(api: APIClient = .shared, defaults: UserDefaults = .standard) {
+        self.api = api
+        self.defaults = defaults
+        self.server = defaults.string(forKey: "server") ?? "https://your-domain.example"
+        self.username = defaults.string(forKey: "username") ?? "xiaomei"
+        self.authToken = defaults.string(forKey: "authToken") ?? ""
         NotificationCenter.default.publisher(for: .apnsToken)
             .compactMap { $0.object as? String }
             .sink { [weak self] token in
@@ -44,10 +56,13 @@ final class ChatViewModel: ObservableObject {
     var loggedIn: Bool { !authToken.isEmpty }
 
     func login() async {
+        guard !isLoggingIn else { return }
+        isLoggingIn = true
+        defer { isLoggingIn = false }
         do {
             server = normalizedServer(server)
             let body = LoginBody(username: username, password: password)
-            let response: LoginResponse = try await APIClient.shared.request(
+            let response: LoginResponse = try await request(
                 "/api/auth/login",
                 baseURL: server,
                 method: "POST",
@@ -61,9 +76,9 @@ final class ChatViewModel: ObservableObject {
             me = response.user
             password = ""
             errorText = ""
-            UserDefaults.standard.set(server, forKey: "server")
-            UserDefaults.standard.set(username, forKey: "username")
-            UserDefaults.standard.set(authToken, forKey: "authToken")
+            defaults.set(server, forKey: "server")
+            defaults.set(username, forKey: "username")
+            defaults.set(authToken, forKey: "authToken")
 
             await refreshChats()
             startRealtime()
@@ -74,46 +89,127 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    func logout() {
+    func logout(revoke: Bool = true) {
+        let oldToken = authToken
+        let oldServer = server
         stopRealtime()
+        restoreTask?.cancel()
+        restoreTask = nil
         authToken = ""
         me = nil
         chats = []
         selected = nil
         messages = []
         closingTokens = []
-        UserDefaults.standard.removeObject(forKey: "authToken")
+        defaults.removeObject(forKey: "authToken")
+        defaults.removeObject(forKey: "pendingPushSessionToken")
+        if revoke && !oldToken.isEmpty {
+            Task {
+                let _: OKResponse? = try? await api.request(
+                    "/api/auth/logout", baseURL: oldServer, token: oldToken, method: "POST"
+                )
+            }
+        }
     }
 
     func restore() async {
-        guard loggedIn else { return }
+        guard loggedIn, !restoring else { return }
+        restoring = true
+        let initialToken = authToken
+        defer { restoring = false }
         do {
             server = normalizedServer(server)
-            let user: APIUser = try await APIClient.shared.request(
-                "/api/auth/me",
-                baseURL: server,
-                token: authToken
-            )
-            me = user
+            let response: LoginResponse
+            do {
+                response = try await request(
+                    "/api/auth/session", baseURL: server, token: initialToken, method: "POST"
+                )
+            } catch APIError.http(404, _) {
+                // Allow the app to be installed before the server upgrade.
+                let user: APIUser = try await request(
+                    "/api/auth/me", baseURL: server, token: initialToken
+                )
+                response = LoginResponse(token: initialToken, user: user)
+            }
+            guard authToken == initialToken else { return }
+            guard ["agent", "admin"].contains(response.user.role) else {
+                logout(revoke: false)
+                errorText = "该账号不是客服账号"
+                return
+            }
+            authToken = response.token
+            defaults.set(authToken, forKey: "authToken")
+            me = response.user
+            errorText = ""
+            restoreTask?.cancel()
+            restoreTask = nil
             await refreshChats()
+            guard loggedIn else { return }
             startRealtime()
-            requestPushPermission()
-            await openPendingPushIfNeeded()
+            if isForeground {
+                requestPushPermission()
+                await openPendingPushIfNeeded()
+            }
         } catch {
-            logout()
+            guard authToken == initialToken else { return }
+            if let error = error as? APIError, error.requiresLogin {
+                logout(revoke: false)
+                errorText = error.localizedDescription
+            } else {
+                connected = false
+                errorText = "网络暂不可用，登录已保留，正在自动重连"
+                scheduleRestore()
+            }
+        }
+    }
+
+    private func scheduleRestore() {
+        restoreTask?.cancel()
+        restoreTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled, let self, self.loggedIn, self.isForeground else { return }
+            self.restoreTask = nil
+            await self.restore()
         }
     }
 
     func becameActive() async {
+        isForeground = true
         guard loggedIn else { return }
-        connectSocket(force: socket == nil)
-        await syncNow()
+        // A socket may still look open after iOS suspended the application.
+        cancelSocket()
+        await restore()
+    }
+
+    func enteredBackground() {
+        isForeground = false
+        stopRealtime()
+        restoreTask?.cancel()
+        restoreTask = nil
+    }
+
+    private func request<T: Decodable>(
+        _ path: String, baseURL: String, token: String? = nil,
+        method: String = "GET", body: Encodable? = nil
+    ) async throws -> T {
+        do {
+            let response: T = try await api.request(path, baseURL: baseURL, token: token, method: method, body: body)
+            if let token, token != authToken { throw CancellationError() }
+            return response
+        } catch {
+            if let token, token == authToken,
+               let apiError = error as? APIError, apiError.requiresLogin {
+                logout(revoke: false)
+                errorText = apiError.localizedDescription
+            }
+            throw error
+        }
     }
 
     func refreshChats(silent: Bool = false) async {
         guard loggedIn else { return }
         do {
-            let rows: [ChatSession] = try await APIClient.shared.request(
+            let rows: [ChatSession] = try await request(
                 "/api/staff/chats",
                 baseURL: server,
                 token: authToken
@@ -132,21 +228,21 @@ final class ChatViewModel: ObservableObject {
     func open(token: String) async {
         if let session = chats.first(where: { $0.token == token }) {
             await open(session)
-            UserDefaults.standard.removeObject(forKey: "pendingPushSessionToken")
+            defaults.removeObject(forKey: "pendingPushSessionToken")
             return
         }
 
         await refreshChats()
         if let session = chats.first(where: { $0.token == token }) {
             await open(session)
-            UserDefaults.standard.removeObject(forKey: "pendingPushSessionToken")
+            defaults.removeObject(forKey: "pendingPushSessionToken")
         }
     }
 
     func open(_ session: ChatSession) async {
         selected = session
         do {
-            let response: ChatMessagesResponse = try await APIClient.shared.request(
+            let response: ChatMessagesResponse = try await request(
                 "/api/staff/chats/\(session.token)/messages",
                 baseURL: server,
                 token: authToken
@@ -167,7 +263,7 @@ final class ChatViewModel: ObservableObject {
         guard !content.isEmpty else { return }
 
         do {
-            let sent: ChatMessage = try await APIClient.shared.request(
+            let sent: ChatMessage = try await request(
                 "/api/staff/chats/\(session.token)/messages",
                 baseURL: server,
                 token: authToken,
@@ -186,7 +282,7 @@ final class ChatViewModel: ObservableObject {
     func uploadImage(_ data: Data) async {
         guard let session = selected else { return }
         do {
-            let sent = try await APIClient.shared.uploadImage(
+            let sent = try await api.uploadImage(
                 "/api/staff/chats/\(session.token)/upload",
                 baseURL: server,
                 token: authToken,
@@ -207,7 +303,7 @@ final class ChatViewModel: ObservableObject {
         defer { closingTokens.remove(session.token) }
 
         do {
-            let _: CloseChatResponse = try await APIClient.shared.request(
+            let _: CloseChatResponse = try await request(
                 "/api/staff/chats/\(session.token)/close",
                 baseURL: server,
                 token: authToken,
@@ -222,7 +318,7 @@ final class ChatViewModel: ObservableObject {
     func registerDevice(_ deviceToken: String) async {
         guard loggedIn, me?.role == "agent" else { return }
         do {
-            let _: OKResponse = try await APIClient.shared.request(
+            let _: OKResponse = try await request(
                 "/api/staff/device-token",
                 baseURL: server,
                 token: authToken,
@@ -246,7 +342,7 @@ final class ChatViewModel: ObservableObject {
     private func markRead(_ token: String, refreshList: Bool) async {
         guard loggedIn else { return }
         do {
-            let _: ReadChatResponse = try await APIClient.shared.request(
+            let _: ReadChatResponse = try await request(
                 "/api/staff/chats/\(token)/read",
                 baseURL: server,
                 token: authToken,
@@ -263,7 +359,7 @@ final class ChatViewModel: ObservableObject {
     private func refreshSelectedMessages(silent: Bool = true) async {
         guard let token = selected?.token, loggedIn else { return }
         do {
-            let response: ChatMessagesResponse = try await APIClient.shared.request(
+            let response: ChatMessagesResponse = try await request(
                 "/api/staff/chats/\(token)/messages",
                 baseURL: server,
                 token: authToken
@@ -287,6 +383,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func startRealtime() {
+        guard loggedIn, isForeground else { return }
         stopRealtime()
         connectSocket()
         startSyncLoop()
@@ -315,7 +412,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func connectSocket(force: Bool = false) {
-        guard loggedIn else { return }
+        guard loggedIn, isForeground, me != nil else { return }
         if socket != nil, !force { return }
         if force {
             cancelSocket()
@@ -335,6 +432,7 @@ final class ChatViewModel: ObservableObject {
         socketSession = session
         socket = task
         connected = false
+        lastSocketActivity = Date()
         task.resume()
 
         receiveTask = Task { [weak self] in
@@ -344,9 +442,17 @@ final class ChatViewModel: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 20_000_000_000)
                 guard !Task.isCancelled, self?.socket === task else { return }
+                guard let self else { return }
+                if Date().timeIntervalSince(self.lastSocketActivity) > 60 {
+                    self.cancelSocket()
+                    self.scheduleReconnect()
+                    return
+                }
                 do {
                     try await task.send(.string("ping"))
                 } catch {
+                    self.cancelSocket()
+                    self.scheduleReconnect()
                     return
                 }
             }
@@ -357,6 +463,8 @@ final class ChatViewModel: ObservableObject {
         while !Task.isCancelled, socket === task {
             do {
                 let received = try await task.receive()
+                guard socket === task else { return }
+                lastSocketActivity = Date()
                 let text: String
                 switch received {
                 case let .string(value):
@@ -485,7 +593,8 @@ final class ChatViewModel: ObservableObject {
         reconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 1_800_000_000)
             guard !Task.isCancelled, let self, self.loggedIn, self.socket == nil else { return }
-            self.connectSocket()
+            self.reconnectTask = nil
+            await self.restore()
         }
     }
 
@@ -510,7 +619,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func openPendingPushIfNeeded() async {
-        guard let token = UserDefaults.standard.string(forKey: "pendingPushSessionToken") else { return }
+        guard let token = defaults.string(forKey: "pendingPushSessionToken") else { return }
         await open(token: token)
     }
 
