@@ -43,7 +43,7 @@ jobs:
           xcodegen generate --spec project.yml
           xcodebuild -project CustomerServiceApp.xcodeproj -scheme CustomerServiceApp -showBuildSettings >/dev/null
 
-      - name: 验证登录保留与断网恢复
+      - name: 验证登录保留、断网恢复与访客来源
         shell: bash
         run: |
           set -euo pipefail
@@ -98,19 +98,19 @@ jobs:
 
           (
             cd "$UNSIGNED_ROOT"
-            /usr/bin/zip -qry "$GITHUB_WORKSPACE/build/ipa/CustomerService-iOS-1.0.11-unsigned.ipa" Payload
+            /usr/bin/zip -qry "$GITHUB_WORKSPACE/build/ipa/CustomerService-iOS-1.0.12-unsigned.ipa" Payload
           )
           (
             cd "$RESIGNABLE_ROOT"
-            /usr/bin/zip -qry "$GITHUB_WORKSPACE/build/ipa/CustomerService-iOS-1.0.11-resignable.ipa" Payload
+            /usr/bin/zip -qry "$GITHUB_WORKSPACE/build/ipa/CustomerService-iOS-1.0.12-resignable.ipa" Payload
           )
 
       - name: 校验包结构、占位签名和包名
         shell: bash
         run: |
           set -euo pipefail
-          UNSIGNED_IPA="build/ipa/CustomerService-iOS-1.0.11-unsigned.ipa"
-          RESIGNABLE_IPA="build/ipa/CustomerService-iOS-1.0.11-resignable.ipa"
+          UNSIGNED_IPA="build/ipa/CustomerService-iOS-1.0.12-unsigned.ipa"
+          RESIGNABLE_IPA="build/ipa/CustomerService-iOS-1.0.12-resignable.ipa"
           [[ -f "$UNSIGNED_IPA" ]]
           [[ -f "$RESIGNABLE_IPA" ]]
 
@@ -146,8 +146,8 @@ jobs:
           {
             echo "bundle_id=$ACTUAL_BUNDLE_ID"
             echo "bundle_executable=$ACTUAL_EXECUTABLE"
-            echo "marketing_version=1.0.11"
-            echo "build_number=6"
+            echo "marketing_version=1.0.12"
+            echo "build_number=7"
             echo "unsigned_ipa_signed=false"
             echo "resignable_ipa_signature=ad-hoc-placeholder"
             echo "embedded_profile=false"
@@ -157,7 +157,7 @@ jobs:
       - name: 上传待重签 IPA
         uses: actions/upload-artifact@v4
         with:
-          name: CustomerService-iOS-1.0.11-resignable
+          name: CustomerService-iOS-1.0.12-resignable
           path: build/ipa/
           if-no-files-found: error
           retention-days: 30

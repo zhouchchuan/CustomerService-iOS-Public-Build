@@ -32,6 +32,7 @@ struct ChatSession: Codable, Identifiable, Hashable {
     let is_closed: Bool?
     let closed_at: String?
     let source_url: String?
+    let source_quality: String?
 
     var displayName: String {
         let area = Self.cleanLocation(visitor_city) ?? Self.cleanLocation(visitor_region)
@@ -118,6 +119,36 @@ struct ChatMessage: Codable, Identifiable, Hashable {
 struct ChatMessagesResponse: Codable {
     let session: ChatSession
     let messages: [ChatMessage]
+}
+
+struct VisitorDetails: Decodable {
+    let session: ChatSession
+    let visits: [VisitorSource]
+}
+
+struct VisitorSource: Decodable, Identifiable {
+    let id: Int
+    let source_url: String
+    let source_quality: String
+    let source_kind: String
+    let ip: String
+    let visited_at: String
+}
+
+enum SourceLink {
+    static func url(_ value: String?) -> URL? {
+        guard let value, !value.contains("\\"),
+              !value.unicodeScalars.contains(where: { $0.value < 32 }),
+              let url = URL(string: value),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              url.host != nil, url.user == nil, url.password == nil else { return nil }
+        return url
+    }
+
+    static func quality(_ value: String?) -> String {
+        guard let url = url(value) else { return "unknown" }
+        return (url.path.isEmpty || url.path == "/") && url.query == nil && url.fragment == nil ? "site" : "page"
+    }
 }
 
 struct SendMessageBody: Codable {

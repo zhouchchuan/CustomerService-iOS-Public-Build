@@ -76,7 +76,7 @@ private struct LoginView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .padding(.top, 8)
-                    Text("V1.0.11").font(.caption).foregroundStyle(.secondary)
+                    Text("V1.0.12").font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(24)
             }
@@ -87,6 +87,7 @@ private struct LoginView: View {
 private struct MainView: View {
     @EnvironmentObject private var viewModel: ChatViewModel
     @State private var showChat = false
+    @State private var visitor: ChatSession?
 
     var body: some View {
         NavigationStack {
@@ -106,15 +107,12 @@ private struct MainView: View {
                 } else {
                     List {
                         ForEach(viewModel.chats) { chat in
-                            Button {
+                            ChatRow(chat: chat, onOpen: {
                                 Task {
                                     await viewModel.open(chat)
                                     showChat = viewModel.selected != nil
                                 }
-                            } label: {
-                                ChatRow(chat: chat)
-                            }
-                            .buttonStyle(.plain)
+                            }, onVisitor: { visitor = chat })
                             .listRowInsets(EdgeInsets(top: 6, leading: 14, bottom: 6, trailing: 14))
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
@@ -166,6 +164,9 @@ private struct MainView: View {
             .navigationDestination(isPresented: $showChat) {
                 ChatView()
             }
+            .navigationDestination(isPresented: Binding(get: { visitor != nil }, set: { if !$0 { visitor = nil } })) {
+                if let visitor { VisitorDetailView(initialSession: visitor) }
+            }
             .onChange(of: viewModel.selected?.token) { token in
                 showChat = token != nil
             }
@@ -175,18 +176,23 @@ private struct MainView: View {
 
 private struct ChatRow: View {
     let chat: ChatSession
+    let onOpen: () -> Void
+    let onVisitor: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            Circle()
-                .fill(Color.blue.gradient)
-                .frame(width: 48, height: 48)
-                .overlay {
-                    Text(chat.avatarText)
-                        .foregroundStyle(.white)
-                        .bold()
-                }
+            Button(action: onVisitor) {
+                Circle()
+                    .fill(Color.blue.gradient)
+                    .frame(width: 48, height: 48)
+                    .overlay {
+                        Text(chat.avatarText).foregroundStyle(.white).bold()
+                    }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("查看访客详情")
 
+            Button(action: onOpen) {
             VStack(alignment: .leading, spacing: 5) {
                 HStack {
                     Text(chat.displayName)
@@ -210,6 +216,10 @@ private struct ChatRow: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
         .padding(14)
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -236,6 +246,7 @@ private struct ChatView: View {
     @State private var text = ""
     @State private var photoItem: PhotosPickerItem?
     @State private var mediaPreview: MediaPreviewItem?
+    @State private var showVisitor = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -246,7 +257,8 @@ private struct ChatView: View {
                             MessageBubble(
                                 message: message,
                                 server: viewModel.server,
-                                onPreview: { mediaPreview = $0 }
+                                onPreview: { mediaPreview = $0 },
+                                onVisitor: { showVisitor = true }
                             )
                                 .id(message.id)
                         }
@@ -302,6 +314,15 @@ private struct ChatView: View {
         .background(Color(.systemGroupedBackground))
         .navigationTitle(viewModel.selected?.displayName ?? "会话")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button { showVisitor = true } label: { Image(systemName: "person.crop.circle") }
+                    .accessibilityLabel("访客详情")
+            }
+        }
+        .navigationDestination(isPresented: $showVisitor) {
+            if let session = viewModel.selected { VisitorDetailView(initialSession: session) }
+        }
         .fullScreenCover(item: $mediaPreview) { item in
             MediaPreviewView(item: item)
         }
@@ -312,6 +333,7 @@ private struct MessageBubble: View {
     let message: ChatMessage
     let server: String
     let onPreview: (MediaPreviewItem) -> Void
+    let onVisitor: () -> Void
 
     private var isAgent: Bool { message.sentByAgent }
     private var isSystem: Bool { message.sender_type == "system" }
@@ -344,6 +366,7 @@ private struct MessageBubble: View {
                     if isAgent { Spacer(minLength: 42) }
 
                     if !isAgent {
+                        Button(action: onVisitor) {
                         Circle()
                             .fill(Color.orange.gradient)
                             .frame(width: 30, height: 30)
@@ -352,6 +375,9 @@ private struct MessageBubble: View {
                                     .font(.caption.bold())
                                     .foregroundStyle(.white)
                             }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("查看访客详情")
                     }
 
                     VStack(alignment: isAgent ? .trailing : .leading, spacing: 4) {

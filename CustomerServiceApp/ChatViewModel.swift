@@ -225,6 +225,10 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    func visitorDetails(token: String) async throws -> VisitorDetails {
+        try await request("/api/staff/chats/\(token)/visitor", baseURL: server, token: authToken)
+    }
+
     func open(token: String) async {
         if let session = chats.first(where: { $0.token == token }) {
             await open(session)
@@ -522,7 +526,7 @@ final class ChatViewModel: ObservableObject {
                 return message.markingRead(at: event.read_at)
             }
 
-        case "session_reopened":
+        case "session_reopened", "visitor_source_updated":
             if let session = event.session {
                 upsertSession(session)
             }
